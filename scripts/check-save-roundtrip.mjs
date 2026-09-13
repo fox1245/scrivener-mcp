@@ -5,7 +5,6 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setTimeout as delay } from 'node:timers/promises';
 import { parseStringPromise } from 'xml2js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -76,15 +75,8 @@ try {
 	const documentId = result.structuredContent.documentId;
 	assert.ok(documentId);
 	const contentPath = path.join(projectPath, 'Files/Data', documentId, 'content.rtf');
-	for (let attempt = 0; attempt < 60; attempt++) {
-		try {
-			await fs.access(contentPath);
-			break;
-		} catch {
-			await delay(200);
-		}
-	}
-	await fs.access(contentPath);
+	await fs.access(contentPath); // No polling: create must finish the body write.
+
 	await call('refresh_project');
 	const read = await call('read_document', { documentId, format: 'plain' });
 	assert.equal(
@@ -110,6 +102,73 @@ try {
 		beforeBytes,
 		'Source project must remain unchanged'
 	);
+	const roots = Array.isArray(before.ScrivenerProject.Binder.BinderItem)
+		? before.ScrivenerProject.Binder.BinderItem
+		: [before.ScrivenerProject.Binder.BinderItem];
+	const parentRoots = roots.filter((item) =>
+		['DraftFolder', 'ResearchFolder', 'Folder'].includes(item.$?.Type)
+	);
+	assert.ok(parentRoots.length > 0);
+	const nestedDocuments = [];
+	for (const parent of parentRoots) {
+		const parentId = parent.$.UUID;
+		const folder = (
+			await call('create_document', {
+				title: 'Codex 폴더 검증',
+				documentType: 'Folder',
+				parentId,
+			})
+		).structuredContent.documentId;
+		const nested = (
+			await call('create_document', { title: 'Codex 하위 문서', content, parentId: folder })
+		).structuredContent.documentId;
+		const readText = async () =>
+			(await call('read_document', { documentId: nested, format: 'plain' })).content
+				.filter((block) => block.type === 'text')
+				.map((block) => block.text)
+				.join('\n')
+				.trim();
+		assert.equal(await readText(), content);
+		const updated = content + '\n\n수정 직후 읽기와 재열기를 확인합니다.';
+		await call('write_document', { documentId: nested, content: updated });
+		assert.equal(await readText(), updated);
+		nestedDocuments.push({ parentId, folder, documentId: nested, content: updated });
+	}
+	const closingStarted = Date.now();
+	await call('close_project');
+	const closeMs = Date.now() - closingStarted;
+	assert.ok(closeMs < 10000, `Project close took ${closeMs}ms`);
+	// Windows refuses this rename while SQLite handles are still open.
+	const dbDir = path.join(projectPath, '.scrivener-databases');
+	await fs.rename(dbDir, dbDir + '-closed');
+	await fs.rename(dbDir + '-closed', dbDir);
+	await call('open_project', { path: projectPath });
+	for (const doc of nestedDocuments) {
+		const read = await call('read_document', { documentId: doc.documentId, format: 'plain' });
+		assert.equal(
+			read.content
+				.filter((block) => block.type === 'text')
+				.map((block) => block.text)
+				.join('\n')
+				.trim(),
+			doc.content
+		);
+	}
+	await call('close_project');
+	const finalXml = await parse(await fs.readFile(scrivxPath, 'utf8'));
+	const asArray = (value) => (value ? (Array.isArray(value) ? value : [value]) : []);
+	for (const doc of nestedDocuments) {
+		const parent = asArray(finalXml.ScrivenerProject.Binder.BinderItem).find(
+			(item) => item.$?.UUID === doc.parentId
+		);
+		const folder = asArray(parent.Children?.BinderItem).find(
+			(item) => item.$?.UUID === doc.folder
+		);
+		assert.equal(folder?.$.Type, 'Folder');
+		assert.ok(
+			asArray(folder.Children?.BinderItem).some((item) => item.$?.UUID === doc.documentId)
+		);
+	}
 	const report = {
 		status: 'SCRIVENER_FORK_MCP_SAVE_VERIFIED',
 		projectPath,
@@ -117,6 +176,11 @@ try {
 		documentId,
 		title,
 		toolCount: tools.length,
+		nestedDocuments,
+		closeMs,
+		immediateRead: true,
+		closeReopen: true,
+		databaseUnlocked: true,
 		unchangedSave: true,
 		originalXmlPreserved: true,
 		koreanBodyReadBack: true,

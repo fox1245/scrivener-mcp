@@ -104,8 +104,23 @@ export class DocumentManager {
 	}
 
 	/**
-	 * Deduplicate operations to prevent redundant work
+	 * Serialize writes to a document without dropping distinct requests.
 	 */
+	private async serializedWrite(
+		documentId: string,
+		operation: () => Promise<void>
+	): Promise<void> {
+		const key = `write:${documentId}`;
+		const previous = this.operationQueue.get(key) ?? Promise.resolve();
+		const current = previous.catch(() => undefined).then(operation);
+		this.operationQueue.set(key, current);
+		try {
+			await current;
+		} finally {
+			if (this.operationQueue.get(key) === current) this.operationQueue.delete(key);
+		}
+	}
+
 	private async dedupedOperation<T>(key: string, operation: () => Promise<T>): Promise<T> {
 		if (this.operationQueue.has(key)) {
 			return this.operationQueue.get(key) as Promise<T>;
@@ -198,12 +213,12 @@ export class DocumentManager {
 	}
 
 	/**
-	 * Write document content with batching and deduplication
+	 * Persist explicit writes before returning; batching is opt-in.
 	 */
 	async writeDocument(
 		documentId: string,
 		content: string | RTFContent,
-		immediate = false
+		immediate = true
 	): Promise<void> {
 		if (immediate) {
 			return this.writeDocumentImmediate(documentId, content);
@@ -238,7 +253,7 @@ export class DocumentManager {
 				`Invalid document ID format: ${truncate(documentId, 50)}`
 			);
 		}
-		return this.dedupedOperation(`write:${documentId}`, async () => {
+		return this.serializedWrite(documentId, async () => {
 			const filePath = getDocumentPath(this.projectPath, documentId);
 			logger.debug(`Writing document to ${filePath}`);
 
@@ -299,7 +314,7 @@ export class DocumentManager {
 				`Invalid document ID format: ${truncate(documentId, 50)}`
 			);
 		}
-		return this.dedupedOperation(`write:${documentId}`, async () => {
+		return this.serializedWrite(documentId, async () => {
 			const filePath = getDocumentPath(this.projectPath, documentId);
 			await ensureDir(path.dirname(filePath));
 
@@ -947,6 +962,7 @@ export class DocumentManager {
 
 		// Ensure any pending writes are saved
 		await this.flushPendingWrites();
+		await Promise.all(this.operationQueue.values());
 
 		this.documentCache.clear();
 	}

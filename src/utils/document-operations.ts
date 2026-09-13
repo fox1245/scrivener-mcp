@@ -7,7 +7,11 @@ import { generateScrivenerUUID } from './scrivener-utils.js';
 import { createError, ErrorCode } from '../core/errors.js';
 import { getLogger } from '../core/logger.js';
 import type { LogContext } from '../core/logger.js';
-// import type { BinderItem, BinderContainer } from '../types/scrivx.js';
+import type {
+	BinderItem as NativeBinderItem,
+	BinderContainer as NativeBinderContainer,
+} from '../types/internal.js';
+import { addBinderItem, iterateBinderItems } from '../services/document-manager-helpers.js';
 
 interface BinderItem {
 	UUID: string;
@@ -108,117 +112,89 @@ export async function createDocument(
 	context: DocumentOperationContext
 ): Promise<DocumentCreationResult> {
 	return withDocumentTransaction(
-		async () => {
-			// Validate project structure
-			const projectStructure = context.projectStructure as {
-				ScrivenerProject?: { Binder?: BinderContainer };
-			};
-			if (!projectStructure?.ScrivenerProject?.Binder) {
-				throw createError(ErrorCode.INVALID_STATE, undefined, 'Project not loaded');
-			}
-
-			const binder = projectStructure.ScrivenerProject.Binder as BinderContainer;
-			const id = generateScrivenerUUID();
-			const type = options.type || 'Text';
-
-			// Create the document file if it's a text document
-			if (type === 'Text' && context.writeDocument) {
-				await context.writeDocument(id, options.content || '');
-			}
-
-			// Create the binder item
-			const newItem: BinderItem = {
-				UUID: id,
-				Type: type,
-				Title: options.title,
-				Created: new Date().toISOString(),
-				Modified: new Date().toISOString(),
-				Children: type === 'Folder' ? [] : undefined,
-			};
-
-			// Add metadata if provided
-			if (options.metadata) {
-				const metadataWithDefaults = {
-					...options.metadata,
-					IncludeInCompile: 'Yes',
-					NotesTextSelection: [0, 0],
-					StatusID: options.metadata.status || 'N/A',
-				};
-				newItem.MetaData = metadataWithDefaults as Record<string, unknown>;
-			}
-
-			// Find parent and add item
-			let parentPath: string[] = [];
-			if (options.parentId) {
-				const parent = findBinderItem(binder, options.parentId);
-				if (!parent.item) {
-					throw createError(
-						ErrorCode.NOT_FOUND,
-						undefined,
-						`Parent folder not found: ${options.parentId}`
-					);
-				}
-				if (parent.item.Type !== 'Folder') {
-					throw createError(
-						ErrorCode.INVALID_REQUEST,
-						undefined,
-						'Parent must be a folder'
-					);
-				}
-
-				// Add to parent's children
-				if (!parent.item.Children) {
-					parent.item.Children = [];
-				}
-				parent.item.Children.push(newItem);
-				parentPath = parent.path;
-			} else {
-				// Add to root draft folder by default
-				const draftFolder = Array.isArray(binder.BinderItem)
-					? binder.BinderItem[0]
-					: binder.BinderItem;
-				if (draftFolder && draftFolder.Type === 'Folder') {
-					if (!draftFolder.Children) {
-						draftFolder.Children = [];
-					}
-					draftFolder.Children.push(newItem);
-					parentPath = [draftFolder.Title || 'Draft'];
-				} else {
-					// Fallback: add to root
-					if (!binder.BinderItem) {
-						binder.BinderItem = [];
-					}
-					if (Array.isArray(binder.BinderItem)) {
-						binder.BinderItem.push(newItem);
-					}
-				}
-			}
-
-			// Update modified timestamp on parent
-			const now = new Date().toISOString();
-			if (options.parentId) {
-				const parent = findBinderItem(binder, options.parentId);
-				if (parent.item) {
-					parent.item.Modified = now;
-				}
-			}
-
-			logger.info(`Document created: ${id} (${options.title})`);
-
-			return {
-				id,
-				path: [...parentPath, options.title],
-				created: new Date(),
-			};
-		},
+		() => createDocumentInBinder(options, context),
 		context,
 		`create document "${options.title}"`
 	);
 }
 
-/**
- * Batch document creation with transaction support
- */
+function findNativeParent(
+	binder: NativeBinderContainer,
+	id: string,
+	path: string[] = []
+): { item: NativeBinderItem; path: string[] } | undefined {
+	for (const item of iterateBinderItems(binder)) {
+		const itemPath = [...path, item.Title || ''];
+		if (item.UUID === id || item.ID === id) return { item, path: itemPath };
+		if (item.Children) {
+			const found = findNativeParent(item.Children, id, itemPath);
+			if (found) return found;
+		}
+	}
+	return undefined;
+}
+
+async function createDocumentInBinder(
+	options: DocumentCreationOptions,
+	context: DocumentOperationContext
+): Promise<DocumentCreationResult> {
+	const structure = context.projectStructure as {
+		ScrivenerProject?: { Binder?: NativeBinderContainer };
+	};
+	const binder = structure?.ScrivenerProject?.Binder;
+	if (!binder) throw createError(ErrorCode.INVALID_STATE, undefined, 'Project not loaded');
+	let parent: NativeBinderItem | undefined;
+	let parentPath: string[] = [];
+	if (options.parentId) {
+		const found = findNativeParent(binder, options.parentId);
+		if (!found)
+			throw createError(
+				ErrorCode.NOT_FOUND,
+				undefined,
+				`Parent folder not found: ${options.parentId}`
+			);
+		if (!['Folder', 'DraftFolder', 'ResearchFolder'].includes(found.item.Type || '')) {
+			throw createError(ErrorCode.INVALID_REQUEST, undefined, 'Parent must be a folder');
+		}
+		parent = found.item;
+		parentPath = found.path;
+	} else {
+		// Preserve the existing default location for projects whose first item is a normal folder.
+		const first = [...iterateBinderItems(binder)][0];
+		if (first?.Type === 'Folder') {
+			parent = first;
+			parentPath = [first.Title || 'Draft'];
+		}
+	}
+	// Validate the destination before creating a file or mutating the binder.
+	const id = generateScrivenerUUID();
+	const type = options.type || 'Text';
+	const now = new Date();
+	const item: NativeBinderItem & { Created: string; Modified: string } = {
+		UUID: id,
+		Type: type,
+		Title: options.title,
+		Created: now.toISOString(),
+		Modified: now.toISOString(),
+	};
+	if (options.metadata) {
+		item.MetaData = {
+			...options.metadata,
+			IncludeInCompile: 'Yes',
+			NotesTextSelection: [0, 0],
+			StatusID: options.metadata.status || 'N/A',
+		} as NativeBinderItem['MetaData'];
+	}
+	if (type === 'Text' && context.writeDocument)
+		await context.writeDocument(id, options.content || '');
+	const destination = parent ? (parent.Children ||= {}) : binder;
+	addBinderItem(destination, item);
+	if (parent && options.parentId)
+		(parent as NativeBinderItem & { Modified?: string }).Modified = now.toISOString();
+	return { id, path: [...parentPath, options.title], created: now };
+}
+
+/** Batch creation shares the same native binder handling and saves once. */
 export async function createDocuments(
 	documents: DocumentCreationOptions[],
 	context: DocumentOperationContext
@@ -226,102 +202,7 @@ export async function createDocuments(
 	return withDocumentTransaction(
 		async () => {
 			const results: DocumentCreationResult[] = [];
-
-			for (const doc of documents) {
-				// Create each document within the same transaction
-				// Note: We don't use nested transactions here
-				const projectStructure = context.projectStructure as {
-					ScrivenerProject?: { Binder?: BinderContainer };
-				};
-				if (!projectStructure?.ScrivenerProject?.Binder) {
-					throw createError(ErrorCode.INVALID_STATE, undefined, 'Project not loaded');
-				}
-
-				const binder = projectStructure.ScrivenerProject.Binder as BinderContainer;
-				const id = generateScrivenerUUID();
-				const type = doc.type || 'Text';
-
-				// Create the document file if it's a text document
-				if (type === 'Text' && context.writeDocument) {
-					await context.writeDocument(id, doc.content || '');
-				}
-
-				// Create the binder item
-				const newItem: BinderItem = {
-					UUID: id,
-					Type: type,
-					Title: doc.title,
-					Created: new Date().toISOString(),
-					Modified: new Date().toISOString(),
-					Children: type === 'Folder' ? [] : undefined,
-				};
-
-				// Add metadata if provided
-				if (doc.metadata) {
-					const metadataWithDefaults = {
-						...doc.metadata,
-						IncludeInCompile: 'Yes',
-						NotesTextSelection: [0, 0],
-						StatusID: doc.metadata.status || 'N/A',
-					};
-					newItem.MetaData = metadataWithDefaults as Record<string, unknown>;
-				}
-
-				// Find parent and add item
-				let parentPath: string[] = [];
-				if (doc.parentId) {
-					const parent = findBinderItem(binder, doc.parentId);
-					if (!parent.item) {
-						throw createError(
-							ErrorCode.NOT_FOUND,
-							undefined,
-							`Parent folder not found: ${doc.parentId}`
-						);
-					}
-					if (parent.item.Type !== 'Folder') {
-						throw createError(
-							ErrorCode.INVALID_REQUEST,
-							undefined,
-							'Parent must be a folder'
-						);
-					}
-
-					// Add to parent's children
-					if (!parent.item.Children) {
-						parent.item.Children = [];
-					}
-					parent.item.Children.push(newItem);
-					parentPath = parent.path;
-				} else {
-					// Add to root draft folder by default
-					const draftFolder = Array.isArray(binder.BinderItem)
-						? binder.BinderItem[0]
-						: binder.BinderItem;
-					if (draftFolder && draftFolder.Type === 'Folder') {
-						if (!draftFolder.Children) {
-							draftFolder.Children = [];
-						}
-						draftFolder.Children.push(newItem);
-						parentPath = [draftFolder.Title || 'Draft'];
-					} else {
-						// Fallback: add to root
-						if (!binder.BinderItem) {
-							binder.BinderItem = [];
-						}
-						if (Array.isArray(binder.BinderItem)) {
-							binder.BinderItem.push(newItem);
-						}
-					}
-				}
-
-				results.push({
-					id,
-					path: [...parentPath, doc.title],
-					created: new Date(),
-				});
-			}
-
-			logger.info(`Batch created ${documents.length} documents`);
+			for (const doc of documents) results.push(await createDocumentInBinder(doc, context));
 			return results;
 		},
 		context,

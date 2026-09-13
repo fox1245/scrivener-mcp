@@ -52,6 +52,64 @@ describe('ProjectLoader XML round trips', () => {
 
 	const parse = (xml: string) => parseStringPromise(xml, { explicitArray: false });
 
+	it.each([draftId, '33333333-3333-4333-8333-333333333333'])(
+		'creates nested folders and immediately readable documents under %s',
+		async (parentId) => {
+			const structure = await loader.loadProject();
+			manager.setProjectStructure(structure);
+			const context = {
+				projectStructure: structure,
+				projectPath,
+				writeDocument: (id: string, text: string) => manager.writeDocument(id, text),
+				saveProject: () => loader.saveProject(structure),
+			};
+			const folder = await createDocument(
+				{ title: '새 폴더', type: 'Folder', parentId },
+				context
+			);
+			const doc = await createDocument(
+				{ title: '새 본문', content: '즉시 저장', parentId: folder.id },
+				context
+			);
+			expect(doc.path.slice(-2)).toEqual(['새 폴더', '새 본문']);
+			manager.clearCache();
+			expect(await manager.readDocument(doc.id)).toBe('즉시 저장');
+			manager.setProjectStructure(await loader.reloadProject());
+			expect(
+				(await manager.getDocumentsUnderFolder(folder.id)).map((doc) => doc.title)
+			).toContain('새 본문');
+		}
+	);
+
+	it('does not write content for an invalid parent', async () => {
+		let writes = 0;
+		await expect(
+			createDocument(
+				{ title: 'invalid', parentId: textId },
+				{
+					projectStructure: await loader.loadProject(),
+					projectPath,
+					writeDocument: async () => {
+						writes++;
+					},
+				}
+			)
+		).rejects.toThrow('Parent must be a folder');
+		expect(writes).toBe(0);
+	});
+
+	it('persists default writes and serializes concurrent updates instead of discarding them', async () => {
+		await manager.writeDocument(textId, '첫 저장');
+		manager.clearCache();
+		expect(await manager.readDocument(textId)).toBe('첫 저장');
+		await Promise.all([
+			manager.writeDocument(textId, '두 번째', true),
+			manager.writeDocument(textId, '마지막', true),
+		]);
+		manager.clearCache();
+		expect(await manager.readDocument(textId)).toBe('마지막');
+	});
+
 	it('preserves root, binder, and unknown attributes through two unchanged saves', async () => {
 		await loader.loadProject();
 		await loader.saveProject();

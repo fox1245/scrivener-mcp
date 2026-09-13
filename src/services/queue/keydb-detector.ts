@@ -62,6 +62,7 @@ export async function detectConnection(): Promise<ConnectionInfo> {
 	}
 
 	for (const url of urls) {
+		let client: Redis | undefined;
 		try {
 			const startTime = Date.now();
 
@@ -70,11 +71,14 @@ export async function detectConnection(): Promise<ConnectionInfo> {
 				? Math.max(3000, bestConnection.latency * 3) // 3x latency or min 3s
 				: 5000; // fallback to 5s
 
-			const client = new Redis(url as string, {
+			client = new Redis(url as string, {
 				connectTimeout: adaptiveTimeout,
 				retryStrategy: () => null, // Don't retry (we handle retries at higher level)
 				lazyConnect: true,
+				commandTimeout: adaptiveTimeout,
 			});
+			// The awaited connection/command reports failures; avoid unhandled error events.
+			client.on('error', () => {});
 
 			await client.connect();
 
@@ -109,6 +113,9 @@ export async function detectConnection(): Promise<ConnectionInfo> {
 				error: (error as Error).message,
 				networkHealth: networkMonitor.getHealthScore(),
 			});
+		} finally {
+			// Authentication and INFO failures must not leave probe sockets alive.
+			client?.disconnect();
 		}
 	}
 

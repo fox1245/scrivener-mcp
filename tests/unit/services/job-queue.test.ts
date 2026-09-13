@@ -7,6 +7,7 @@ import { JobQueueService, JobType } from '../../../src/services/queue/job-queue'
 import { Queue, Worker, QueueEvents } from 'bullmq';
 import * as keydbDetector from '../../../src/services/queue/keydb-detector';
 import { AIClient } from '../../../src/services/ai/ai-client';
+import { DatabaseService } from '../../../src/handlers/database/database-service';
 
 // Mock BullMQ
 jest.mock('bullmq');
@@ -112,6 +113,14 @@ describe('JobQueueService v2', () => {
 	});
 
 	describe('initialization', () => {
+		it('closes its project database on shutdown', async () => {
+			detectConnectionMock.mockResolvedValue({ isAvailable: false, type: 'none', url: null });
+			await jobQueueService.initialize();
+			const results = (DatabaseService as unknown as jest.Mock).mock.results;
+			const database = results[results.length - 1].value as DatabaseService;
+			await jobQueueService.shutdown();
+			expect(database.close).toHaveBeenCalledTimes(1);
+		});
 		it('should initialize with KeyDB when available', async () => {
 			const mockConnection = { quit: jest.fn() };
 

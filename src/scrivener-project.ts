@@ -406,7 +406,7 @@ export class ScrivenerProject {
 		const context: DocumentOperationContext = {
 			projectStructure: this.documentManager.getProjectStructureData(),
 			projectPath: this.projectPath,
-			writeDocument: (id, content) => this.documentManager.writeDocument(id, content),
+			writeDocument: (id, content) => this.documentManager.writeDocument(id, content, true),
 			saveProject: () => this.saveProject(),
 		};
 
@@ -1466,8 +1466,8 @@ export class ScrivenerProject {
 		// Shutdown async services (job queue, AI services)
 		await shutdownAsyncServices();
 
-		await this.databaseService.close();
 		await this.documentManager.close();
+		await this.databaseService.close();
 
 		logger.info('Project closed');
 	}

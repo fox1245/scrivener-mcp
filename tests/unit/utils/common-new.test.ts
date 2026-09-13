@@ -180,7 +180,7 @@ describe('Common Utilities - New Functions', () => {
 
 			it('should handle single segment', () => {
 				const result = buildPath('/home');
-				expect(result).toBe('/home');
+				expect(result).toBe(path.normalize('/home'));
 			});
 
 			it('should handle empty segments', () => {

@@ -38,6 +38,8 @@ export async function initializeAsyncServices(
 ): Promise<void> {
 	try {
 		const initResult = await measureExecution(async () => {
+			// Release the previous queue's database before replacing the singleton.
+			await shutdownAsyncServices();
 			// Initialize job queue with automatic KeyDB/Redis detection
 			// Will use KeyDB/Redis if available, otherwise falls back to embedded queue
 			jobQueueService = new JobQueueService(options.projectPath);

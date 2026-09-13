@@ -11,7 +11,6 @@ import { validateInput, createError, ErrorCode } from '../utils/common.js';
 import { compact } from '../core/response-formatter.js';
 import { resolveScrivenerProjectPath } from '../utils/scrivener-utils.js';
 import { detectOpenScrivenerProjects, resolveProjectNames } from '../utils/scrivener-app.js';
-import { DatabaseService } from './database/database-service.js';
 import { PersonalizationService } from '../services/personalization/personalization-service.js';
 import { SHARED_DEFS } from './shared-schemas.js';
 import type { DocumentInfo } from '../types/index.js';
@@ -66,7 +65,7 @@ export const openProjectHandler: ToolDefinition = {
 
 		// Close existing project
 		if (context.project) {
-			await context.project.close();
+			await closeProjectHandler.handler({}, context);
 		}
 
 		// Initialize new project
@@ -77,6 +76,7 @@ export const openProjectHandler: ToolDefinition = {
 		try {
 			await project.loadProject();
 		} catch (error) {
+			await project.close();
 			const expectedScrivxPath = path.join(
 				projectPath,
 				`${path.basename(projectPath, path.extname(projectPath))}.scrivx`
@@ -89,8 +89,7 @@ export const openProjectHandler: ToolDefinition = {
 		}
 
 		// Initialize database service
-		const dbService = new DatabaseService(projectPath);
-		await dbService.initialize();
+		const dbService = project.getDatabaseService();
 
 		// Initialize memory manager
 		const memoryManager = new MemoryManager(projectPath, dbService);
@@ -346,11 +345,11 @@ export const closeProjectHandler: ToolDefinition = {
 	},
 	handler: async (_args, context): Promise<HandlerResult> => {
 		const project = requireProject(context);
-		await project.close();
 
 		if (context.memoryManager) {
 			await context.memoryManager.stopAutoSave();
 		}
+		await project.close();
 
 		context.project = null;
 		context.memoryManager = null;

@@ -849,7 +849,7 @@ export class DatabaseService {
 	 */
 	async close(): Promise<void> {
 		if (this.sqliteManager) {
-			this.sqliteManager.close();
+			await this.sqliteManager.close();
 			this.sqliteManager = null;
 		}
 
@@ -857,6 +857,7 @@ export class DatabaseService {
 			await this.neo4jManager.close();
 			this.neo4jManager = null;
 		}
+		this.initialized = false;
 	}
 
 	/**

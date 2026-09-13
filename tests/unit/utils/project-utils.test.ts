@@ -88,7 +88,7 @@ describe('Project Utils', () => {
 		it('should work with different project paths', () => {
 			const differentProject = '/home/user/novel.scriv';
 			const result = getQueueStatePath(differentProject);
-			expect(result).toBe('/home/user/novel.scriv/.scrivener-mcp/queue-state.json');
+			expect(result).toBe(join('/home/user/novel.scriv/.scrivener-mcp/queue-state.json'));
 		});
 	});
 
@@ -107,7 +107,7 @@ describe('Project Utils', () => {
 		it('should work with different project paths', () => {
 			const differentProject = '/home/user/story.scriv';
 			const result = getCacheDirectory(differentProject);
-			expect(result).toBe('/home/user/story.scriv/.scrivener-mcp/cache');
+			expect(result).toBe(join('/home/user/story.scriv/.scrivener-mcp/cache'));
 		});
 	});
 

@@ -1013,6 +1013,12 @@ export class JobQueueService {
 		}
 
 		// Clear maps
+		if (this.databaseService) {
+			await this.databaseService.close();
+			this.databaseService = null;
+		}
+		this.connection = undefined;
+		this.memoryRedis = undefined;
 		this.queues.clear();
 		this.workers.clear();
 		this.events.clear();
